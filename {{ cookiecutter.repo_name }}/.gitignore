@@ -72,8 +72,12 @@ target/
 # Spyder
 .spyproject/
 
-# Jupyter NB Checkpoints
+# Jupyter
 .ipynb_checkpoints/
+.jupyter/
+.local/
+.ipython/
+.python_history
 
 # exclude data from source control by default
 /data/
@@ -87,3 +91,12 @@ target/
 
 # Mypy cache
 .mypy_cache/
+
+# container related
+.running_containers
+
+# shell files
+.bash_history
+
+# Conda related
+.conda/

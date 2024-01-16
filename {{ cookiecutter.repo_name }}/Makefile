@@ -1,144 +1,123 @@
-.PHONY: clean data lint requirements sync_data_to_s3 sync_data_from_s3
+.PHONY: all jupyter pause address containers list-containers stop-containers \
+        restart-containers clear-nb clean
 
-#################################################################################
-# GLOBALS                                                                       #
-#################################################################################
+# Usage:
+# make                    # just alias to containers command
+# make jupyter            # startup Docker container running Jupyter server
+# make pause              # pause PSECS (to pause between commands)
+# make address            # get Docker container address/port
+# make containers         # launch all Docker containers
+# make list-containers    # list all running containers
+# make stop-containers    # simply stops all running Docker containers
+# make restart-containers # restart all containers
+# make clear-nb           # simply clears Jupyter notebook output
+# make clean              # combines all clearing commands into one
 
-PROJECT_DIR := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
-BUCKET = {{ cookiecutter.s3_bucket }}
-PROFILE = {{ cookiecutter.aws_profile }}
-PROJECT_NAME = {{ cookiecutter.repo_name }}
-PYTHON_INTERPRETER = {{ cookiecutter.python_interpreter }}
+################################################################################
+# GLOBALS                                                                      #
+################################################################################
 
-ifeq (,$(shell which conda))
-HAS_CONDA=False
-else
-HAS_CONDA=True
-endif
+# make cli args
+DCTNR := $(notdir $(PWD))
+INTDR := notebooks
+PSECS := 5
 
-#################################################################################
-# COMMANDS                                                                      #
-#################################################################################
+# notebook-related variables
+CURRENTDIR := $(PWD)
+NOTEBOOKS  := $(shell find ${INTDR} -name "*.ipynb" -not -path "*/.ipynb_*/*")
 
-## Install Python Dependencies
-requirements: test_environment
-	$(PYTHON_INTERPRETER) -m pip install -U pip setuptools wheel
-	$(PYTHON_INTERPRETER) -m pip install -r requirements.txt
+# docker-related variables
+JPTCTNR = jupyter.${DCTNR}
+DCKRIMG = {{ cookiecutter.docker_image }}
+DCKRRUN = docker run --rm -v ${CURRENTDIR}:/home/jovyan -it ${DCKRIMG}
 
-## Make Dataset
-data: requirements
-	$(PYTHON_INTERPRETER) src/data/make_dataset.py data/raw data/processed
+# jupyter nbconvert vars
+NBCLER = jupyter nbconvert --clear-output --inplace
 
-## Delete all compiled Python files
-clean:
-	find . -type f -name "*.py[co]" -delete
-	find . -type d -name "__pycache__" -delete
+################################################################################
+# COMMANDS                                                                     #
+################################################################################
 
-## Lint using flake8
-lint:
-	flake8 src
+# launch jupyter
+all: containers
 
-## Upload Data to S3
-sync_data_to_s3:
-ifeq (default,$(PROFILE))
-	aws s3 sync data/ s3://$(BUCKET)/data/
-else
-	aws s3 sync data/ s3://$(BUCKET)/data/ --profile $(PROFILE)
-endif
+# launch jupyter notebook development Docker image
+jupyter:
+	@ echo "Launching Jupyter in Docker container -> ${JPTCTNR} ..."
+	@ if ! docker ps --format={{ "{{.Names}}" }} | grep -q "${JPTCTNR}"; then \
+	  docker run -d \
+	             --rm \
+	             --name ${JPTCTNR} \
+	             -e PYTHONPATH=/home/jovyan/src \
+	             -e JUPYTER_ENABLE_LAB=yes \
+	             -p 8888 \
+	             -v "${CURRENTDIR}":/home/jovyan \
+	             ${DCKROPT} \
+	             ${DCKRIMG} && \
+	  if ! grep -sq "${JPTCTNR}" "${CURRENTDIR}/.running_containers"; then \
+	    echo "${JPTCTNR}" >> .running_containers; \
+	  fi \
+	else \
+	  echo "Container already running. Try setting DCTNR manually."; \
+	fi
 
-## Download Data from S3
-sync_data_from_s3:
-ifeq (default,$(PROFILE))
-	aws s3 sync s3://$(BUCKET)/data/ data/
-else
-	aws s3 sync s3://$(BUCKET)/data/ data/ --profile $(PROFILE)
-endif
+# simply wait for a certain amount of time
+pause:
+	@ echo "Sleeping ${PSECS} seconds ..."
+	@ sleep ${PSECS}
 
-## Set up python interpreter environment
-create_environment:
-ifeq (True,$(HAS_CONDA))
-		@echo ">>> Detected conda, creating conda environment."
-ifeq (3,$(findstring 3,$(PYTHON_INTERPRETER)))
-	conda create --name $(PROJECT_NAME) python=3
-else
-	conda create --name $(PROJECT_NAME) python=2.7
-endif
-		@echo ">>> New conda env created. Activate with:\nsource activate $(PROJECT_NAME)"
-else
-	$(PYTHON_INTERPRETER) -m pip install -q virtualenv virtualenvwrapper
-	@echo ">>> Installing virtualenvwrapper if not already installed.\nMake sure the following lines are in shell startup file\n\
-	export WORKON_HOME=$$HOME/.virtualenvs\nexport PROJECT_HOME=$$HOME/Devel\nsource /usr/local/bin/virtualenvwrapper.sh\n"
-	@bash -c "source `which virtualenvwrapper.sh`;mkvirtualenv $(PROJECT_NAME) --python=$(PYTHON_INTERPRETER)"
-	@echo ">>> New virtualenv created. Activate with:\nworkon $(PROJECT_NAME)"
-endif
+# get containerized server address
+address:
+	@ if [ -f "${CURRENTDIR}/.running_containers" ]; then \
+	while read container; do \
+	  if echo "$${container}" | grep -q "${JPTCTNR}" ; then \
+	    echo "Server address: $$(docker logs $${container} 2>&1 | \
+	          grep http://127.0.0.1 | tail -n 1 | \
+	          sed s/:8888/:$$(docker port $${container} | \
+	          grep '0.0.0.0:' | awk '{print $$3}' | sed 's/0.0.0.0://g')/g | \
+	          tr -d '[:blank:]')"; \
+	  else \
+	    echo "Could not find running container: ${JPTCTNR}." \
+	         "Try running: make list-containers"; \
+	  fi \
+	done < "${CURRENTDIR}/.running_containers"; \
+	else \
+	  echo ".running_containers file not found. Is a Docker container running?"; \
+	fi
 
-## Test python environment is setup correctly
-test_environment:
-	$(PYTHON_INTERPRETER) test_environment.py
+# launch all docker containers
+containers: jupyter pause address
 
-#################################################################################
-# PROJECT RULES                                                                 #
-#################################################################################
+# list all running containers
+list-containers:
+	@ if [ -f "${CURRENTDIR}/.running_containers" ]; then \
+	echo "Currently running containers:"; \
+	while read container; do \
+	  echo "-->  $${container}"; \
+	done < "${CURRENTDIR}/.running_containers"; \
+	else \
+	  echo ".running_containers file not found. Is a Docker container running?"; \
+	fi
 
+# stop all containers
+stop-containers:
+	@ if [ -f "${CURRENTDIR}/.running_containers" ]; then \
+	  echo "Stopping Docker containers ..."; \
+	  while read container; do \
+	    echo "Container $$(docker stop $$container) stopped."; \
+	  done < "${CURRENTDIR}/.running_containers"; \
+	  rm -f "${CURRENTDIR}/.running_containers"; \
+	else \
+	  echo "${CURRENTDIR}/.running_containers file not found."; \
+	fi
 
+# restart all containers
+restart-containers: stop-containers containers
 
-#################################################################################
-# Self Documenting Commands                                                     #
-#################################################################################
+# remove output from executed notebooks
+clear-nb:
+	@ echo "Removing all output from Jupyter notebooks."
+	@ ${DCKRRUN} ${NBCLER} ${NOTEBOOKS}
 
-.DEFAULT_GOAL := help
-
-# Inspired by <http://marmelab.com/blog/2016/02/29/auto-documented-makefile.html>
-# sed script explained:
-# /^##/:
-# 	* save line in hold space
-# 	* purge line
-# 	* Loop:
-# 		* append newline + line to hold space
-# 		* go to next line
-# 		* if line starts with doc comment, strip comment character off and loop
-# 	* remove target prerequisites
-# 	* append hold space (+ newline) to line
-# 	* replace newline plus comments by `---`
-# 	* print line
-# Separate expressions are necessary because labels cannot be delimited by
-# semicolon; see <http://stackoverflow.com/a/11799865/1968>
-.PHONY: help
-help:
-	@echo "$$(tput bold)Available rules:$$(tput sgr0)"
-	@echo
-	@sed -n -e "/^## / { \
-		h; \
-		s/.*//; \
-		:doc" \
-		-e "H; \
-		n; \
-		s/^## //; \
-		t doc" \
-		-e "s/:.*//; \
-		G; \
-		s/\\n## /---/; \
-		s/\\n/ /g; \
-		p; \
-	}" ${MAKEFILE_LIST} \
-	| LC_ALL='C' sort --ignore-case \
-	| awk -F '---' \
-		-v ncol=$$(tput cols) \
-		-v indent=19 \
-		-v col_on="$$(tput setaf 6)" \
-		-v col_off="$$(tput sgr0)" \
-	'{ \
-		printf "%s%*s%s ", col_on, -indent, $$1, col_off; \
-		n = split($$2, words, " "); \
-		line_length = ncol - indent; \
-		for (i = 1; i <= n; i++) { \
-			line_length -= length(words[i]) + 1; \
-			if (line_length <= 0) { \
-				line_length = ncol - indent - length(words[i]) - 1; \
-				printf "\n%*s ", -indent, " "; \
-			} \
-			printf "%s ", words[i]; \
-		} \
-		printf "\n"; \
-	}' \
-	| more $(shell test $(shell uname) = Darwin && echo '--no-init --raw-control-chars')
+# cleanup everything
+clean: clear-nb
